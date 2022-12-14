@@ -60,8 +60,6 @@ def matchfmt(datetime):
 	raise ValueError(f"时间格式没有匹配成功")
 	# return (datetime, fmt[0])
 
-
-
 def readEXIFdateTimeOriginal(fname):
 	'''返回照片的拍摄日期（时间戳），读取错误返回None'''
 	# dateformat = '%Y:%m:%d %H:%M:%S'
@@ -83,9 +81,47 @@ def readEXIFdateTimeOriginal(fname):
 #r'(\d{4})[\-\:\s\_\/]?(1[0-2]|0[1-9])[\-\:\s\_\/]?([1-2]\d|3[0-1]|0[1-9])'  匹配日期
 
 
+class FileType(object):
+	'''文件类型相关的处理函数集合'''
+	_pic = {'.jpg', '.png', '.jpeg'}    #默认处理的照片文件
+	_video = {'.mp4', '.avi', '.mov'}    #默认处理的视频文件
 
+	@classmethod
+	def pictype(cls):
+		'''照片类文件'''
+		return cls._pic
+
+	@classmethod
+	def videotype(cls):
+		'''视频类文件'''
+		return cls._video
+
+	@classmethod
+	def typemap(cls, suffix):
+		'''根据扩展名返回合适的文件类型标识：照片(PIC)、视频(VIDEO)、普通(COMMON)'''
+		if suffix.lower() in cls._pic:
+			return 'PIC'
+		elif suffix.lower() in cls._video:
+			return 'VIDEO'
+		else:
+			return 'COMMON'
+
+	@classmethod
+	def add(cls, suffix):
+		'''添加额外的文件类型，suffix：文件扩展名（如 '.mpeg'）'''
+		pic = ['.bmp', '.tif', '.gif']                   #限制乱添加
+		video = ['.mpg', '.mpeg', '.3gp', '.dat', '.mkv']   #限制乱添加
+		suffix = suffix.lower()
+		if suffix in pic:
+			cls._pic.add(suffix)     #添加到照片文件集合
+		elif suffix in video:
+			cls._video.add(suffix)   #添加到视频文件集合
+		else:
+			raise ValueError(f"不是支持的文件类型，添加失败: {suffix}")
+
+#弃用
 class NeedFileType(object):
-	'''需要处理的文件的类型'''
+	'''返回需要处理的文件的类型'''
 	@staticmethod
 	def PICTYPE():
 		'''照片类文件'''
@@ -96,12 +132,12 @@ class NeedFileType(object):
 		'''视频类文件'''
 		return {'.mp4'}  #集合类型
 
-
+#弃用
 def chooseFileType(suffix):
 	'''根据扩展名返回合适的文件类型标识：照片(PIC)、视频(VIDEO)、普通(COMMON)'''
-	if suffix.lower() in NeedFileType.PICTYPE():
+	if suffix.lower() in FileType.pictype():
 		return 'PIC'
-	elif suffix.lower() in NeedFileType.VIDEOTYPE():
+	elif suffix.lower() in FileType.videotype():
 		return 'VIDEO'
 	else:
 		return 'COMMON'
@@ -179,7 +215,7 @@ FILE_TYPE_MAP = {'PIC': JpgFileStats, 'VIDEO': VideoFileStats, 'COMMON': FileSta
 def fileTransfer(fname):
 	'''根据不同的文件类型，使用不同的类'''
 	suffix = PurePath(fname).suffix
-	ftype = chooseFileType(suffix)
+	ftype = FileType.typemap(suffix)
 	FileTransferClass = FILE_TYPE_MAP[ftype]
 	return FileTransferClass(fname)
 
@@ -191,7 +227,7 @@ class MediaFolder(object):
 
 	@property
 	def fmd5s(self):
-		'''返回目录下所以文件的MD5码的列表'''
+		'''返回目录下所有文件的MD5码的列表'''
 		return self._fmd5s
 
 	def _sumfiles(self):
@@ -211,6 +247,19 @@ class MediaFolder(object):
 				logger.error(f"fmd5码文件读取错误: {err}")
 		return fmd5s if len(fmd5s)==self._sumfiles() else []  #数量核对有差异返回空list
 
+	def _scan(self):
+		'''获取目录下所有文件的MD5码'''
+		fmd5s = self._readfmd5file()
+		if not fmd5s:
+			for f in self._fpath.rglob('*.*'):
+				if Path(f).is_file() and f not in list(self._fpath.glob('*.*')):
+					try:
+						fmd5s.append(fileMd5(f))
+					except Exception as e:
+						logger.error(f"获取文件MD5码错误: {f}")
+						continue
+		return fmd5s
+
 	def writefmd5file(self):
 		'''复制文件完成，保存fmd5码到文件中'''
 		fname = Path(self._fpath, 'fmd5.dat')
@@ -225,19 +274,6 @@ class MediaFolder(object):
 		else:
 			logger.error(f"fmd5码保存时数量核对不正确，保存失败")
 
-
-	def _scan(self):
-		'''获取目录下所有文件的MD5码'''
-		fmd5s = self._readfmd5file()
-		if not fmd5s:
-			for f in self._fpath.rglob('*.*'):
-				if Path(f).is_file() and f not in list(self._fpath.glob('*.*')):
-					try:
-						fmd5s.append(fileMd5(f))
-					except Exception as e:
-						logger.error(f"获取文件MD5码错误: {f}")
-						continue
-		return fmd5s
 
 	def exists(self, fname):
 		'''判断文件是否存在'''
@@ -301,8 +337,8 @@ class MediaFolder(object):
 
 
 def countFtype(folder):
-	'''统计目录下所有文件的类型，返回存在的需要的文件类型'''
-	ftypes = NeedFileType.PICTYPE() | NeedFileType.VIDEOTYPE()  #需要的文件类型 并集
+	'''统计目录下所有文件的类型，返回目录下存在的需要的文件类型'''
+	ftypes = FileType.pictype() | FileType.videotype()  #需要的文件类型 并集
 	suffix_list = set([f.suffix.lower() for f in Path(folder).rglob('*.*') if f.is_file()])
 	otherftype = suffix_list - ftypes    #差集
 	if otherftype:
@@ -315,7 +351,7 @@ def countFtype(folder):
 def scanFolder(srcp, needftype):
 	'''返回目录下指定类型的文件'''
 	# needftype = countFtype(srcp)
-	if needftype:
+	if needftype:         #避免值为None时产生异常
 		for ftype in needftype:
 			for f in Path(srcp).rglob(f"*{ftype}"):
 				if f.is_file():
@@ -345,7 +381,7 @@ def main(srcp, destp):
 if __name__ == '__main__':
 	# srcfile = 'd:\\浙江人事考试网.txt'
 	# srcfile = 'd:\\pictest.jpg'
-	srcfile = 'd:\\000_1832.jpg'
+	# srcfile = 'd:\\000_1832.jpg'
 	# mfolder = MediaFolder(r'd:\copytest')
 	# print(mfolder.fmd5s)
 	# mfolder.writefmd5file()
@@ -355,10 +391,13 @@ if __name__ == '__main__':
 	# print(list(scanFolder(r'c:\\')))
 	# copyresult = list(map(mfolder.copy, scanFolder(r'd:\copytest')))
 	# print(copyresult.count(False))
-	# print(NeedFileType.PICTYPE() | NeedFileType.VIDEOTYPE())
-	# main(r'd:\copytest', r'd:\copytest1')
-	print(readEXIFdateTimeOriginal(srcfile))
+	main(r'd:\copytest', r'd:\copytest1')
+	# print(readEXIFdateTimeOriginal(srcfile))
 	# print(matchfmt('2022-12-14 08:47:04'))
 	# print(matchfmt('2022:12:14 08:47:04'))
+	# FileType.add('.tif')
+	# FileType.add('.3gp')
+	# print(f"照片类文件: {FileType.pictype()}\n视频类文件: {FileType.videotype()}")
+	# print(f"文件类型映射名: {FileType.typemap('.mp4')}")
 
 
