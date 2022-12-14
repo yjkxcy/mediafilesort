@@ -1,6 +1,7 @@
 import time
 import hashlib
 import shutil
+import re
 import logging
 import logging.handlers
 import pickle
@@ -45,20 +46,42 @@ def fileMd5(fname):
 	logger.debug(f"文件 '{Path(fname).name}' 的MD5码: {fmd5.hexdigest()}")
 	return fmd5.hexdigest()
 
+def matchfmt(datetime):
+	'''匹配不同的EXIF日期的格式，返回日期和日期格式'''
+	fmt = ['%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S']       #转换函数time.strptime()的日期格式
+	#正则匹配时间格式 2022:04:15 20:22:56
+	pattern = [ r'(\d{4}):(1[0-2]|0[1-9]):([1-2]\d|3[0-1]|0[1-9]) ([0-1]\d|2[0-4]):([0-5]\d):([0-5]\d)',
+				r'(\d{4})-(1[0-2]|0[1-9])-([1-2]\d|3[0-1]|0[1-9]) ([0-1]\d|2[0-4]):([0-5]\d):([0-5]\d)']
+	for p, f in zip(pattern, fmt):
+		result = re.match(p, datetime)
+		# print(result)
+		if result:
+			return (result.group(0), f)
+	raise ValueError(f"时间格式没有匹配成功")
+	# return (datetime, fmt[0])
+
+
+
 def readEXIFdateTimeOriginal(fname):
 	'''返回照片的拍摄日期（时间戳），读取错误返回None'''
-	dateformat = '%Y:%m:%d %H:%M:%S'
+	# dateformat = '%Y:%m:%d %H:%M:%S'
 	date = None
 	with open(fname, 'rb') as f:
 		try:
-			tags = exifread.process_file(f, details=False)
+			tags = exifread.process_file(f, details=False, stop_tag='DateTimeOriginal')
 			if 'EXIF DateTimeOriginal' in tags.keys():
-				logger.debug(f"文件拍摄日期的原始格式: {tags['EXIF DateTimeOriginal']}")
-				date = time.mktime(time.strptime(str(tags['EXIF DateTimeOriginal']), dateformat))
+				logger.debug(f"文件拍摄日期的原始格式: {tags['EXIF DateTimeOriginal'].values}")
+				datetimeoriginal, dateformat = matchfmt(tags['EXIF DateTimeOriginal'].values)
+				# print(datetimeoriginal)
+				# print(dateformat)
+				date = time.mktime(time.strptime(datetimeoriginal, dateformat))
 		except Exception as e:
-			logger.error(f"读文件的EXIF信息失败: {fname}")
-			return None
+			logger.error(f"读文件的EXIF信息失败: {fname} 错误: {e}")
 	return date
+#re.compile(r'^(0?[0-9]|1[0-9]|2[0-3]):(0?[0-9]|[1-5][0-9]):(0?[0-9]|[1-5][0-9])$')  匹配时间
+#r'[\-\:\s\_\/]?([0-1]\d|2[0-4])[\-\:\s\_\/]?([0-5]\d)[\-\:\s\_\/]?([0-5]\d)'  匹配时间
+#r'(\d{4})[\-\:\s\_\/]?(1[0-2]|0[1-9])[\-\:\s\_\/]?([1-2]\d|3[0-1]|0[1-9])'  匹配日期
+
 
 
 class NeedFileType(object):
@@ -322,7 +345,7 @@ def main(srcp, destp):
 if __name__ == '__main__':
 	# srcfile = 'd:\\浙江人事考试网.txt'
 	# srcfile = 'd:\\pictest.jpg'
-	# srcfile = 'd:\\000_1832.jpg'
+	srcfile = 'd:\\000_1832.jpg'
 	# mfolder = MediaFolder(r'd:\copytest')
 	# print(mfolder.fmd5s)
 	# mfolder.writefmd5file()
@@ -333,6 +356,9 @@ if __name__ == '__main__':
 	# copyresult = list(map(mfolder.copy, scanFolder(r'd:\copytest')))
 	# print(copyresult.count(False))
 	# print(NeedFileType.PICTYPE() | NeedFileType.VIDEOTYPE())
-	main(r'd:\copytest', r'd:\copytest1')
+	# main(r'd:\copytest', r'd:\copytest1')
+	print(readEXIFdateTimeOriginal(srcfile))
+	# print(matchfmt('2022-12-14 08:47:04'))
+	# print(matchfmt('2022:12:14 08:47:04'))
 
 
