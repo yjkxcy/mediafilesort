@@ -2,9 +2,11 @@ import time
 import hashlib
 import shutil
 import re
+import sys
 import logging
 import logging.handlers
 import pickle
+import argparse
 import exifread
 from pathlib import Path, PurePath
 
@@ -12,6 +14,7 @@ LOGFILE = 'mediafilesort.log'  #日志文件
 DEL_FLAG = False          #删除源文件标志
 SCAN_FLAG = False         #是否扫描目录标志
 COPY_FLAG = False         #是否执行复制动作
+ADDTYPE_FLAG = False      #True增加文件类型，False
 
 def initLogger(name=__name__):
 	'''返回自定义日志，同时在终端和文件中输出日志信息，默认日志级别，终端DEBUG、文件INFO'''
@@ -49,20 +52,17 @@ def fileMd5(fname):
 def matchfmt(datetime):
 	'''匹配不同的EXIF日期的格式，返回日期和日期格式'''
 	fmt = ['%Y:%m:%d %H:%M:%S', '%Y-%m-%d %H:%M:%S']       #转换函数time.strptime()的日期格式
-	#正则匹配时间格式 2022:04:15 20:22:56
+	#正则匹配时间格式 2022:04:15 20:22:56，2022-04-15 20:22:56
 	pattern = [ r'(\d{4}):(1[0-2]|0[1-9]):([1-2]\d|3[0-1]|0[1-9]) ([0-1]\d|2[0-4]):([0-5]\d):([0-5]\d)',
 				r'(\d{4})-(1[0-2]|0[1-9])-([1-2]\d|3[0-1]|0[1-9]) ([0-1]\d|2[0-4]):([0-5]\d):([0-5]\d)']
 	for p, f in zip(pattern, fmt):
 		result = re.match(p, datetime)
-		# print(result)
 		if result:
 			return (result.group(0), f)
 	raise ValueError(f"时间格式没有匹配成功")
-	# return (datetime, fmt[0])
 
 def readEXIFdateTimeOriginal(fname):
 	'''返回照片的拍摄日期（时间戳），读取错误返回None'''
-	# dateformat = '%Y:%m:%d %H:%M:%S'
 	date = None
 	with open(fname, 'rb') as f:
 		try:
@@ -70,16 +70,13 @@ def readEXIFdateTimeOriginal(fname):
 			if 'EXIF DateTimeOriginal' in tags.keys():
 				logger.debug(f"文件拍摄日期的原始格式: {tags['EXIF DateTimeOriginal'].values}")
 				datetimeoriginal, dateformat = matchfmt(tags['EXIF DateTimeOriginal'].values)
-				# print(datetimeoriginal)
-				# print(dateformat)
-				date = time.mktime(time.strptime(datetimeoriginal, dateformat))
+				date = time.mktime(time.strptime(datetimeoriginal, dateformat)) #转换为时间戳
 		except Exception as e:
 			logger.error(f"读文件的EXIF信息失败: {fname} 错误: {e}")
 	return date
 #re.compile(r'^(0?[0-9]|1[0-9]|2[0-3]):(0?[0-9]|[1-5][0-9]):(0?[0-9]|[1-5][0-9])$')  匹配时间
 #r'[\-\:\s\_\/]?([0-1]\d|2[0-4])[\-\:\s\_\/]?([0-5]\d)[\-\:\s\_\/]?([0-5]\d)'  匹配时间
 #r'(\d{4})[\-\:\s\_\/]?(1[0-2]|0[1-9])[\-\:\s\_\/]?([1-2]\d|3[0-1]|0[1-9])'  匹配日期
-
 
 class FileType(object):
 	'''文件类型相关的处理函数集合'''
@@ -110,7 +107,7 @@ class FileType(object):
 	def add(cls, suffix):
 		'''添加额外的文件类型，suffix：文件扩展名（如 '.mpeg'）'''
 		pic = ['.bmp', '.tif', '.gif']                   #限制乱添加
-		video = ['.mpg', '.mpeg', '.3gp', '.dat', '.mkv']   #限制乱添加
+		video = ['.mpg', '.mpeg', '.3gp', '.dat', '.mkv', '.rm', 'rmvb']   #限制乱添加
 		suffix = suffix.lower()
 		if suffix in pic:
 			cls._pic.add(suffix)     #添加到照片文件集合
@@ -119,30 +116,8 @@ class FileType(object):
 		else:
 			raise ValueError(f"不是支持的文件类型，添加失败: {suffix}")
 
-#弃用
-class NeedFileType(object):
-	'''返回需要处理的文件的类型'''
-	@staticmethod
-	def PICTYPE():
-		'''照片类文件'''
-		return {'.jpg'}   #集合类型
-
-	@staticmethod
-	def VIDEOTYPE():
-		'''视频类文件'''
-		return {'.mp4'}  #集合类型
-
-#弃用
-def chooseFileType(suffix):
-	'''根据扩展名返回合适的文件类型标识：照片(PIC)、视频(VIDEO)、普通(COMMON)'''
-	if suffix.lower() in FileType.pictype():
-		return 'PIC'
-	elif suffix.lower() in FileType.videotype():
-		return 'VIDEO'
-	else:
-		return 'COMMON'
-
 class FileStats(object):
+	'''文件状态信息，basename文件名、savedir保存的子目录名、fmd5文件的fmd5码'''
 	def __init__(self, fname):
 		self._fname = Path(fname)
 		self._basename = self._fname.name
@@ -174,7 +149,7 @@ class FileStats(object):
 
 	def ftime(self):
 		'''返回文件的各种日期(最后修改日期、照片的拍摄日期、视频的拍摄日期)，子类通过覆写该函数实现返回不同日期'''
-		return self._fname.stat().st_mtime
+		return self._fname.stat().st_mtime   #最后修改日期
 
 	def _subdir(self):
 		'''返回需保存到的子目录名，如: '20221128' '''
@@ -182,9 +157,9 @@ class FileStats(object):
 		return time.strftime(folderformat, time.localtime(self.ftime()))
 
 class JpgFileStats(FileStats):
-	'''JPG文件'''
+	'''JPG文件或其他带EXIF信息的文件'''
 	def __init__(self, fname):
-		self._dateTimeOriginal = readEXIFdateTimeOriginal(fname)
+		self._dateTimeOriginal = readEXIFdateTimeOriginal(fname)  #获取拍摄日期
 		super().__init__(fname)
 
 	@property
@@ -195,10 +170,10 @@ class JpgFileStats(FileStats):
 
 	def ftime(self):
 		'''覆写父类，如果文件有拍摄日期，返回拍摄日期，否则返回最后修改日期'''
-		fdate = self._fname.stat().st_mtime
+		fdate = self._fname.stat().st_mtime   
 		logger.debug(f"文件的最后修改日期: {fdate}")
 		if self._dateTimeOriginal:
-			fdate = self._dateTimeOriginal
+			fdate = self._dateTimeOriginal    #如果有拍摄日期
 			logger.debug(f"文件的拍摄日期: {fdate}")
 		return fdate   #返回值: 时间戳
 
@@ -206,17 +181,14 @@ class VideoFileStats(FileStats):
 	'''视频文件'''
 	pass
 
-
-
 #对文件类的映射
 FILE_TYPE_MAP = {'PIC': JpgFileStats, 'VIDEO': VideoFileStats, 'COMMON': FileStats}
 
-#根据不同文件类型选用合适的文件类
 def fileTransfer(fname):
-	'''根据不同的文件类型，使用不同的类'''
+	'''根据不同的文件类型，使用不同的类实例化，JpgFileStats VideoFileStats FileStats'''
 	suffix = PurePath(fname).suffix
 	ftype = FileType.typemap(suffix)
-	FileTransferClass = FILE_TYPE_MAP[ftype]
+	FileTransferClass = FILE_TYPE_MAP[ftype]  #赋值不同的类名
 	return FileTransferClass(fname)
 
 class MediaFolder(object):
@@ -249,15 +221,18 @@ class MediaFolder(object):
 
 	def _scan(self):
 		'''获取目录下所有文件的MD5码'''
-		fmd5s = self._readfmd5file()
+		fmd5s = self._readfmd5file()      #读存放fmd5码的文件
 		if not fmd5s:
+			excludefile = list(self._fpath.glob('*.*')) #备份主目录下的文件排除
 			for f in self._fpath.rglob('*.*'):
-				if Path(f).is_file() and f not in list(self._fpath.glob('*.*')):
+				if Path(f).is_file() and f not in excludefile:
 					try:
-						fmd5s.append(fileMd5(f))
+						fmd5s.append(fileMd5(f))  #生成fmd5码并添加到列表
 					except Exception as e:
-						logger.error(f"获取文件MD5码错误: {f}")
-						continue
+						logger.error(f"获取文件MD5码错误: {f} 错误原因: {e}")
+						continue     #继续下一个文件，好像去掉也一样
+			if len(fmd5s) != self._sumfiles():
+				logger.error(f"获取到的fmd5码数量不对")
 		return fmd5s
 
 	def writefmd5file(self):
@@ -280,11 +255,11 @@ class MediaFolder(object):
 		try:
 			fmd5 = fileMd5(fname)
 		except Exception as e:
-			raise ValueError(f"文件的MD5码获取失败: {fname}")
+			raise ValueError(f"文件的MD5码获取失败: {fname} 错误原因: {e}")
 		return fmd5 in self._fmd5s
 
 	def _rename(self, destf):
-		'''重新命名，直到文件不存在'''
+		'''重新命名，直到文件名不存在'''
 		count = 1
 		fpath = Path(destf).parent
 		fstem = Path(destf).stem
@@ -296,11 +271,12 @@ class MediaFolder(object):
 		return Path(fpath, fname)
 
 	def _safecopy(self, srcf, destp):
+		'''拷贝文件到目标目录，如果存在相同文件名，在文件名后加上数字后缀'''
 		destf = Path(destp, Path(srcf).name)
 		logger.debug(f"目标文件名: {destf}")
 		if destf.exists():
-			destf = self._rename(destf) #文件存在，重新命名
-			logger.debug(f"重命名后目标文件名: {destf}")
+			destf = self._rename(destf) #文件名存在，重新命名
+			logger.warning(f"重命名后目标文件名: {destf}")
 		try:
 			shutil.copy2(srcf, destf)
 			return True
@@ -331,40 +307,45 @@ class MediaFolder(object):
 				logger.info(f"复制文件 {srcfile} 到 {subdir} 中成功")
 				if DEL_FLAG:
 					Path(srcfile).unlink()   #复制成功，删除文件
-				return True                 #复制成功
+				return True                 #返回复制成功
 			else:
-				return False                #复制失败
-
+				return False                #返回复制失败
 
 def countFtype(folder):
-	'''统计目录下所有文件的类型，返回目录下存在的需要的文件类型'''
+	'''统计目录下所有文件的类型，返回目录下存在的需要的文件类型，如无返回空集合'''
 	ftypes = FileType.pictype() | FileType.videotype()  #需要的文件类型 并集
-	suffix_list = set([f.suffix.lower() for f in Path(folder).rglob('*.*') if f.is_file()])
+	suffix_list = set([f.suffix.lower() for f in Path(folder).rglob('*.*') if f.is_file()])  #目录下所有文件类型
 	otherftype = suffix_list - ftypes    #差集
 	if otherftype:
 		logger.info(f"目录下其他文件类型有: {otherftype}")
 	needftype = suffix_list & ftypes     #交集
 	if needftype:
 		logger.info(f"目录下存在的需要的文件类型: {needftype}")
-	return needftype
+	return needftype   #如无返回空集合
 
 def scanFolder(srcp, needftype):
 	'''返回目录下指定类型的文件'''
-	# needftype = countFtype(srcp)
 	if needftype:         #避免值为None时产生异常
 		for ftype in needftype:
-			for f in Path(srcp).rglob(f"*{ftype}"):
+			for f in Path(srcp).rglob(f"*{ftype}"):  # "*.jpg"
 				if f.is_file():
 					yield f
 
-
-def main(srcp, destp):
-	SCAN_FLAG = True
-	COPY_FLAG = True
-	mfolder = MediaFolder(destp)
-	needftype = countFtype(srcp)
+def main(srcp, destp, ftype=None): #, scanflag=True, copyflag=True, delflag=False):
+	# SCAN_FLAG = scanflag
+	# COPY_FLAG = copyflag
+	mfolder = MediaFolder(destp)    #目标目录实例化
+	# needftype = ftype if ftype else countFtype(srcp)  #自定义文件类型
+	if ftype:
+		if ADDTYPE_FLAG:
+			needftype = countFtype(srcp) | ftype    #合并文件类型
+		else:
+			needftype = ftype            #用户自定义文件类型
+	else:
+		needftype = countFtype(srcp)    #系统预设文件类型
 	# print(needftype)
-	if SCAN_FLAG:              #扫描文件开关
+	if SCAN_FLAG:              #扫描文件开关，不扫描只输出统计信息
+		logger.info(f"此次扫描的文件类型: {needftype}")
 		if COPY_FLAG:          #复制文件开关
 			copy = mfolder.copy
 		else:
@@ -376,9 +357,49 @@ def main(srcp, destp):
 		
 
 
-
-
 if __name__ == '__main__':
+	parser = argparse.ArgumentParser(description='按时间整理照片或视频文件')
+	parser.add_argument('srcp', help='源文件目录')
+	parser.add_argument('destp', help='目标目录')
+	parser.add_argument('-t', '--ftype', nargs='+', metavar='', help='自定义文件类型')
+	parser.add_argument('-s', '--scanflag', action='store_false', help='不扫描源目录下文件，只输出源目录的统计信息')
+	parser.add_argument('-c', '--copyflag', action='store_false', help='不复制文件到目标目录，只统计需复制的文件数量')
+	parser.add_argument('-d', '--delflag', action='store_true', help='已存在或复制成功后删除源文件')
+	parser.add_argument('-a', '--addtypeflag', action='store_true', help='在系统默认的文件类型上增加新的文件类型')
+	args = parser.parse_args()
+	# print(args.srcp, args.destp, args.ftype, args.scanflag, args.copyflag, args.delflag, args.addtypeflag)
+	if not Path(args.srcp).exists():
+		logger.error(f"源目录不存在: {args.srcp}")
+		sys.exit(1)
+	if not Path(args.destp).exists():
+		logger.error(f"目标目录不存在: {args.destp}")
+		sys.exit(1)
+	#标准化文件类型格式
+	if args.ftype:
+		ftype = set()
+		for ft in args.ftype:
+			result = re.search(r'\w{2,4}', ft)
+			# print(result.group(0))
+			if result:
+				ftype.add(f".{result.group(0)}")   #标准化文件扩展名,形如: '.jpg'
+	else:
+		ftype = None
+	# print(ftype)
+	#赋值全局变量
+	SCAN_FLAG = args.scanflag
+	COPY_FLAG = args.copyflag
+	DEL_FLAG = args.delflag
+	ADDTYPE_FLAG = args.addtypeflag
+	#调用主函数，传入命令行输入的参数
+	main(args.srcp, args.destp, ftype=ftype)
+
+
+
+
+
+
+
+# if __name__ == '__main__':
 	# srcfile = 'd:\\浙江人事考试网.txt'
 	# srcfile = 'd:\\pictest.jpg'
 	# srcfile = 'd:\\000_1832.jpg'
@@ -391,7 +412,7 @@ if __name__ == '__main__':
 	# print(list(scanFolder(r'c:\\')))
 	# copyresult = list(map(mfolder.copy, scanFolder(r'd:\copytest')))
 	# print(copyresult.count(False))
-	main(r'd:\copytest', r'd:\copytest1')
+	# main(r'd:\copytest', r'd:\copytest1')
 	# print(readEXIFdateTimeOriginal(srcfile))
 	# print(matchfmt('2022-12-14 08:47:04'))
 	# print(matchfmt('2022:12:14 08:47:04'))
