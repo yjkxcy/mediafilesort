@@ -14,7 +14,7 @@ LOGFILE = 'mediafilesort.log'  #日志文件
 DEL_FLAG = False          #删除源文件标志
 SCAN_FLAG = False         #是否扫描目录标志
 COPY_FLAG = False         #是否执行复制动作
-ADDTYPE_FLAG = False      #True增加文件类型，False
+ADDTYPE_FLAG = False      #True在默认基础上再增加文件类型，False自定义文件类型
 
 def initLogger(name=__name__):
 	'''返回自定义日志，同时在终端和文件中输出日志信息，默认日志级别，终端DEBUG、文件INFO'''
@@ -66,9 +66,12 @@ def readEXIFdateTimeOriginal(fname):
 	date = None
 	with open(fname, 'rb') as f:
 		try:
+			pattern = re.compile(r'(\d{4}):(1[0-2]|0[1-9]):([1-2]\d|3[0-1]|0[1-9]) ([0-1]\d|2[0-4]):([0-5]\d):([0-5]\d)')
 			tags = exifread.process_file(f, details=False, stop_tag='DateTimeOriginal')
 			if 'EXIF DateTimeOriginal' in tags.keys():
 				logger.debug(f"文件拍摄日期的原始格式: {tags['EXIF DateTimeOriginal'].values}")
+				if not re.match(pattern, tags['EXIF DateTimeOriginal'].values):
+					logger.warning(f"特殊的文件拍摄日期原始格式: {tags['EXIF DateTimeOriginal'].values}")  #不同时间格式
 				datetimeoriginal, dateformat = matchfmt(tags['EXIF DateTimeOriginal'].values)
 				date = time.mktime(time.strptime(datetimeoriginal, dateformat)) #转换为时间戳
 		except Exception as e:
@@ -96,7 +99,7 @@ class FileType(object):
 	@classmethod
 	def typemap(cls, suffix):
 		'''根据扩展名返回合适的文件类型标识：照片(PIC)、视频(VIDEO)、普通(COMMON)'''
-		if suffix.lower() in cls._pic:
+		if suffix.lower() in ['.jpg', '.jpeg', '.png']:    #可能带EXIF的文件
 			return 'PIC'
 		elif suffix.lower() in cls._video:
 			return 'VIDEO'
@@ -223,22 +226,20 @@ class MediaFolder(object):
 		'''获取目录下所有文件的MD5码'''
 		fmd5s = self._readfmd5file()      #读存放fmd5码的文件
 		if not fmd5s:
-			excludefile = list(self._fpath.glob('*.*')) #备份主目录下的文件排除
+			excludefile = list(self._fpath.glob('*.*')) #排除备份目录下一级目录中的文件
 			for f in self._fpath.rglob('*.*'):
 				if Path(f).is_file() and f not in excludefile:
-					try:
-						fmd5s.append(fileMd5(f))  #生成fmd5码并添加到列表
-					except Exception as e:
-						logger.error(f"获取文件MD5码错误: {f} 错误原因: {e}")
-						continue     #继续下一个文件，好像去掉也一样
+					fmd5s.append(fileMd5(f))  #生成fmd5码并添加到列表
 			if len(fmd5s) != self._sumfiles():
-				logger.error(f"获取到的fmd5码数量不对")
+				raise ValueError(f"fmd5码数量和实际文件数不同")
 		return fmd5s
 
 	def writefmd5file(self):
 		'''复制文件完成，保存fmd5码到文件中'''
 		fname = Path(self._fpath, 'fmd5.dat')
-		if len(self._fmd5s) == self._sumfiles():
+		filecount = self._sumfiles()
+		fmd5len = len(self._fmd5s)
+		if filecount == fmd5len:
 			try:
 				with open(fname, 'wb') as f:
 					pickle.dump(self._fmd5s, f)
@@ -247,7 +248,7 @@ class MediaFolder(object):
 				return
 			logger.info(f"fmd5码文件保存成功")
 		else:
-			logger.error(f"fmd5码保存时数量核对不正确，保存失败")
+			logger.error(f"fmd5码保存时数量核对不正确，保存失败: fmd5={fmd5len} filecount={filecount}")
 
 
 	def exists(self, fname):
@@ -304,7 +305,7 @@ class MediaFolder(object):
 				logger.info(f"新建文件夹: {subdir}")
 			if self._safecopy(srcfile, subdir):
 				self._fmd5s.append(fstats.fmd5)
-				logger.info(f"复制文件 {srcfile} 到 {subdir} 中成功")
+				logger.debug(f"复制文件 {srcfile} 到 {subdir} 中成功")
 				if DEL_FLAG:
 					Path(srcfile).unlink()   #复制成功，删除文件
 				return True                 #返回复制成功
@@ -334,7 +335,11 @@ def scanFolder(srcp, needftype):
 def main(srcp, destp, ftype=None): #, scanflag=True, copyflag=True, delflag=False):
 	# SCAN_FLAG = scanflag
 	# COPY_FLAG = copyflag
-	mfolder = MediaFolder(destp)    #目标目录实例化
+	try:
+		mfolder = MediaFolder(destp)    #目标目录实例化
+	except Exception as err:
+		logger.error(f"fmd5码核对错误: {err}")
+		return
 	# needftype = ftype if ftype else countFtype(srcp)  #自定义文件类型
 	if ftype:
 		if ADDTYPE_FLAG:
@@ -344,7 +349,7 @@ def main(srcp, destp, ftype=None): #, scanflag=True, copyflag=True, delflag=Fals
 	else:
 		needftype = countFtype(srcp)    #系统预设文件类型
 	# print(needftype)
-	if SCAN_FLAG:              #扫描文件开关，不扫描只输出统计信息
+	if SCAN_FLAG:              #扫描文件开关，不扫描只输出文件类型的统计信息
 		logger.info(f"此次扫描的文件类型: {needftype}")
 		if COPY_FLAG:          #复制文件开关
 			copy = mfolder.copy
@@ -352,7 +357,8 @@ def main(srcp, destp, ftype=None): #, scanflag=True, copyflag=True, delflag=Fals
 			copy = lambda x: False
 		copyresult = list(map(copy, scanFolder(srcp, needftype)))
 		logger.info(f"文件总数: {len(copyresult)}, 复制成功数: {copyresult.count(True)}")
-	mfolder.writefmd5file()     #保存fmd5码到文件中
+		if copyresult.count(True):
+			mfolder.writefmd5file()     #保存fmd5码到文件中
 
 		
 
