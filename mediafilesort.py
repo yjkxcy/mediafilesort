@@ -223,7 +223,7 @@ class MediaFolder(object):
 		return fmd5s if len(fmd5s)==self._sumfiles() else []  #数量核对有差异返回空list
 
 	def _scan(self):
-		'''获取目录下所有文件的MD5码'''
+		'''获取目录下所有文件的MD5码，先检查是否存在fmd5.dat文件，有就读取，否就扫描目录生成fmd5码'''
 		fmd5s = self._readfmd5file()      #读存放fmd5码的文件
 		if not fmd5s:
 			excludefile = list(self._fpath.glob('*.*')) #排除备份目录下一级目录中的文件
@@ -243,10 +243,9 @@ class MediaFolder(object):
 			try:
 				with open(fname, 'wb') as f:
 					pickle.dump(self._fmd5s, f)
+				logger.info(f"fmd5码文件保存成功")
 			except Exception as err:
 				logger.error(f"fmd5码文件写入错误: {err}")
-				return
-			logger.info(f"fmd5码文件保存成功")
 		else:
 			logger.error(f"fmd5码保存时数量核对不正确，保存失败: fmd5={fmd5len} filecount={filecount}")
 
@@ -314,7 +313,7 @@ class MediaFolder(object):
 
 def countFtype(folder):
 	'''统计目录下所有文件的类型，返回目录下存在的需要的文件类型，如无返回空集合'''
-	ftypes = FileType.pictype() | FileType.videotype()  #需要的文件类型 并集
+	ftypes = FileType.pictype() | FileType.videotype()  #默认需要的文件类型 并集
 	suffix_list = set([f.suffix.lower() for f in Path(folder).rglob('*.*') if f.is_file()])  #目录下所有文件类型
 	otherftype = suffix_list - ftypes    #差集
 	if otherftype:
@@ -332,23 +331,21 @@ def scanFolder(srcp, needftype):
 				if f.is_file():
 					yield f
 
-def main(srcp, destp, ftype=None): #, scanflag=True, copyflag=True, delflag=False):
-	# SCAN_FLAG = scanflag
-	# COPY_FLAG = copyflag
+def main(srcp, destp, ftype=None):
 	try:
 		mfolder = MediaFolder(destp)    #目标目录实例化
 	except Exception as err:
 		logger.error(f"fmd5码核对错误: {err}")
 		return
-	# needftype = ftype if ftype else countFtype(srcp)  #自定义文件类型
+	needftype = countFtype(srcp)   #系统预设文件类型
 	if ftype:
 		if ADDTYPE_FLAG:
-			needftype = countFtype(srcp) | ftype    #合并文件类型
+			needftype = needftype | ftype    #合并文件类型
 		else:
 			needftype = ftype            #用户自定义文件类型
-	else:
-		needftype = countFtype(srcp)    #系统预设文件类型
-	# print(needftype)
+	if not needftype:
+		logger.warning(f"需要扫描的文件类型为空")
+		return
 	if SCAN_FLAG:              #扫描文件开关，不扫描只输出文件类型的统计信息
 		logger.info(f"此次扫描的文件类型: {needftype}")
 		if COPY_FLAG:          #复制文件开关
@@ -398,33 +395,5 @@ if __name__ == '__main__':
 	ADDTYPE_FLAG = args.addtypeflag
 	#调用主函数，传入命令行输入的参数
 	main(args.srcp, args.destp, ftype=ftype)
-
-
-
-
-
-
-
-# if __name__ == '__main__':
-	# srcfile = 'd:\\浙江人事考试网.txt'
-	# srcfile = 'd:\\pictest.jpg'
-	# srcfile = 'd:\\000_1832.jpg'
-	# mfolder = MediaFolder(r'd:\copytest')
-	# print(mfolder.fmd5s)
-	# mfolder.writefmd5file()
-	# mfolder.copy(srcfile)
-	# fstats = fileTransfer(srcfile)
-	# print(f"文件名: {fstats.basename}  子目录: {fstats.savedir}  MD5码: {fstats.fmd5}")
-	# print(list(scanFolder(r'c:\\')))
-	# copyresult = list(map(mfolder.copy, scanFolder(r'd:\copytest')))
-	# print(copyresult.count(False))
-	# main(r'd:\copytest', r'd:\copytest1')
-	# print(readEXIFdateTimeOriginal(srcfile))
-	# print(matchfmt('2022-12-14 08:47:04'))
-	# print(matchfmt('2022:12:14 08:47:04'))
-	# FileType.add('.tif')
-	# FileType.add('.3gp')
-	# print(f"照片类文件: {FileType.pictype()}\n视频类文件: {FileType.videotype()}")
-	# print(f"文件类型映射名: {FileType.typemap('.mp4')}")
 
 
