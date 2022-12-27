@@ -119,6 +119,21 @@ class FileType(object):
 		else:
 			raise ValueError(f"不是支持的文件类型，添加失败: {suffix}")
 
+class FolderFormat(object):
+	'''子目录名的样式，现支持3种：20221227 202212 2022'''
+	fmtdict = {'day': '%Y%m%d', 'month': '%Y%m', 'year': '%Y'}
+	datefmt = '%Y%m%d'
+
+	@classmethod
+	def setfmt(cls, fmt):
+		if fmt:
+			if fmt.lower() in ('day', 'month', 'year'):
+				cls.datefmt = cls.fmtdict[fmt.lower()]
+			else:
+				cls.datefmt = '%Y%m%d'
+		else:
+			cls.datefmt = '%Y%m%d'
+
 class FileStats(object):
 	'''文件状态信息，basename文件名、savedir保存的子目录名、fmd5文件的fmd5码'''
 	def __init__(self, fname):
@@ -155,8 +170,8 @@ class FileStats(object):
 		return self._fname.stat().st_mtime   #最后修改日期
 
 	def _subdir(self):
-		'''返回需保存到的子目录名，如: '20221128' '''
-		folderformat = '%Y%m%d'    #子目录名格式
+		'''返回需保存到的子目录名，如: '20221128', '202211', '2022' '''
+		folderformat = FolderFormat.datefmt    #子目录名格式
 		return time.strftime(folderformat, time.localtime(self.ftime()))
 
 class JpgFileStats(FileStats):
@@ -365,6 +380,7 @@ if __name__ == '__main__':
 	parser.add_argument('srcp', help='源文件目录')
 	parser.add_argument('destp', help='目标目录')
 	parser.add_argument('-t', '--ftype', nargs='+', metavar='', help='自定义文件类型')
+	parser.add_argument('-f', '--format', choices=['day', 'month', 'year'], help='子目录的样式')
 	parser.add_argument('-s', '--scanflag', action='store_false', help='不扫描源目录下文件，只输出源目录的统计信息')
 	parser.add_argument('-c', '--copyflag', action='store_false', help='不复制文件到目标目录，只统计需复制的文件数量')
 	parser.add_argument('-d', '--delflag', action='store_true', help='已存在或复制成功后删除源文件')
@@ -393,6 +409,8 @@ if __name__ == '__main__':
 	COPY_FLAG = args.copyflag
 	DEL_FLAG = args.delflag
 	ADDTYPE_FLAG = args.addtypeflag
+	FolderFormat.setfmt(args.format)   #设置子目录名样式
+	# print(FolderFormat.datefmt)
 	#调用主函数，传入命令行输入的参数
 	main(args.srcp, args.destp, ftype=ftype)
 
