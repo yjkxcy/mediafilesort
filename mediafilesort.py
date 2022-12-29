@@ -12,7 +12,6 @@ from pathlib import Path, PurePath
 
 LOGFILE = 'mediafilesort.log'  #日志文件
 DEL_FLAG = False          #删除源文件标志
-SCAN_FLAG = False         #是否扫描目录标志
 COPY_FLAG = False         #是否执行复制动作
 ADDTYPE_FLAG = False      #True在默认基础上再增加文件类型，False自定义文件类型
 
@@ -81,6 +80,23 @@ def readEXIFdateTimeOriginal(fname):
 #r'[\-\:\s\_\/]?([0-1]\d|2[0-4])[\-\:\s\_\/]?([0-5]\d)[\-\:\s\_\/]?([0-5]\d)'  匹配时间
 #r'(\d{4})[\-\:\s\_\/]?(1[0-2]|0[1-9])[\-\:\s\_\/]?([1-2]\d|3[0-1]|0[1-9])'  匹配日期
 
+class MediaFileType(object):
+	exifimage = {'.jpg', '.png', '.jpeg'}
+	video = {'.mp4', '.avi', '.mov'}
+	commonimage = {'.bmp', '.tif', '.gif'}
+	commonvideo = {'.mpg', '.mpeg', '.3gp', '.dat', '.mkv', '.rm', '.rmvb'}
+
+	@classmethod
+	def typemap(cls, suffix):
+		'''根据扩展名返回合适的文件类型标识：照片(PIC)、视频(VIDEO)、普通(COMMON)'''
+		if suffix.lower() in cls.exifimage:    #可能带EXIF的文件
+			return 'PIC'
+		elif suffix.lower() in (cls.video | cls.commonvideo):
+			return 'VIDEO'
+		else:
+			return 'COMMON'
+
+#弃用
 class FileType(object):
 	'''文件类型相关的处理函数集合'''
 	_pic = {'.jpg', '.png', '.jpeg'}    #默认处理的照片文件
@@ -110,7 +126,7 @@ class FileType(object):
 	def add(cls, suffix):
 		'''添加额外的文件类型，suffix：文件扩展名（如 '.mpeg'）'''
 		pic = ['.bmp', '.tif', '.gif']                   #限制乱添加
-		video = ['.mpg', '.mpeg', '.3gp', '.dat', '.mkv', '.rm', 'rmvb']   #限制乱添加
+		video = ['.mpg', '.mpeg', '.3gp', '.dat', '.mkv', '.rm', '.rmvb']   #限制乱添加
 		suffix = suffix.lower()
 		if suffix in pic:
 			cls._pic.add(suffix)     #添加到照片文件集合
@@ -205,7 +221,7 @@ FILE_TYPE_MAP = {'PIC': JpgFileStats, 'VIDEO': VideoFileStats, 'COMMON': FileSta
 def fileTransfer(fname):
 	'''根据不同的文件类型，使用不同的类实例化，JpgFileStats VideoFileStats FileStats'''
 	suffix = PurePath(fname).suffix
-	ftype = FileType.typemap(suffix)
+	ftype = MediaFileType.typemap(suffix)
 	FileTransferClass = FILE_TYPE_MAP[ftype]  #赋值不同的类名
 	return FileTransferClass(fname)
 
@@ -305,7 +321,7 @@ class MediaFolder(object):
 		try:
 			fstats = fileTransfer(srcfile)
 		except Exception as e:
-			logger.error(f"获取文件基本信息失败: {srcfile}")
+			logger.error(f"获取文件基本信息失败: {srcfile}，错误原因: {e}")
 			return False                      #复制失败
 		if fstats.fmd5 in self._fmd5s:
 			logger.debug(f"文件已经存在: {srcfile}")
@@ -326,6 +342,7 @@ class MediaFolder(object):
 			else:
 				return False                #返回复制失败
 
+#弃用
 def countFtype(folder):
 	'''统计目录下所有文件的类型，返回目录下存在的需要的文件类型，如无返回空集合'''
 	ftypes = FileType.pictype() | FileType.videotype()  #默认需要的文件类型 并集
@@ -338,6 +355,7 @@ def countFtype(folder):
 		logger.info(f"目录下存在的需要的文件类型: {needftype}")
 	return needftype   #如无返回空集合
 
+#弃用
 def scanFolder(srcp, needftype):
 	'''返回目录下指定类型的文件'''
 	if needftype:         #避免值为None时产生异常
@@ -346,72 +364,189 @@ def scanFolder(srcp, needftype):
 				if f.is_file():
 					yield f
 
-def main(srcp, destp, ftype=None):
-	try:
-		mfolder = MediaFolder(destp)    #目标目录实例化
-	except Exception as err:
-		logger.error(f"fmd5码核对错误: {err}")
+class FileSuffix(object):
+	'''文件扩展名相关'''
+	def __init__(self, suffix=None, addflag=False):
+		self._commonmedia = MediaFileType.exifimage | MediaFileType.video | MediaFileType.commonimage | MediaFileType.commonvideo
+		self._defaultmedia = MediaFileType.exifimage | MediaFileType.video
+		self._custommedia = self._normsuffix(suffix) if suffix else set() #规范扩展名格式
+		self._addflag = addflag
+
+	@property
+	def mediasuffix(self):
+		'''返回常见的多媒体文件扩展名'''
+		# return self._exifimage | self._video | self._commonimage | self._commonvideo   #并集
+		return self._commonmedia
+
+	@property
+	def needsuffix(self):
+		'''返回需要的文件扩展名'''
+		if self._custommedia:
+			if self._addflag:
+				return self._defaultmedia | self._custommedia
+			else:
+				return self._custommedia
+		return self._defaultmedia
+
+	def _normsuffix(self, suffix_list):
+		'''检测用户输入的扩展名，进行规范后返回'''
+		result = set()
+		for ext in suffix_list:
+			temp = re.search(r'\w{2,4}', ext)
+			if temp:
+				result.add(f".{temp.group(0)}")
+		result &= self._commonmedia  #删选
+		return result
+
+class SourceFolder(object):
+	'''源目录的基本信息'''
+	def __init__(self, srcpath):
+		self._srcpath = srcpath
+		self._suffix = self._countsuffix()  #目录下所有文件的扩展名列表
+
+	def _countsuffix(self):
+		'''返回目录下所有的文件的扩展名'''
+		return [f.suffix.lower() for f in Path(self._srcpath).rglob('*.*') if f.is_file()]
+
+	@property
+	def filetotal(self):
+		'''返回目录下文件数量'''
+		return len(self._suffix)
+
+	@property
+	def allsuffix(self):
+		'''返回目录下存在的扩展名'''
+		return set(self._suffix)
+
+	def scan(self, suffixs):
+		'''扫描目录，返回需要的文件'''
+		if not suffixs:
+			raise ValueError(f"参数不能为空")
+		for ext in suffixs:
+			for f in Path(self._srcpath).rglob(f"*{ext}"):   # "*.jpg"
+				if f.is_file():
+					yield f
+
+	def counter(self, suffix):
+		'''返回指定文件扩展名的文件数量'''
+		result = 0
+		if suffix in self._suffix:
+			result = self._suffix.count(suffix)
+		return result
+
+def main(srcp, destp, customftype):
+	filesuffix = FileSuffix(customftype, ADDTYPE_FLAG)
+	sourcefolder = SourceFolder(srcp)
+	logger.info(f"文件总数量: {sourcefolder.filetotal}")
+	logger.info(f"包含的多媒体文件类型有: {filesuffix.mediasuffix & sourcefolder.allsuffix}")
+	needftype = filesuffix.needsuffix & filesuffix.mediasuffix & sourcefolder.allsuffix
+	if needftype:
+		logger.info(f"准备备份的多媒体文件类型有: {needftype}")
+	else:
+		logger.error(f"没有需要备份的文件类型")
 		return
-	needftype = countFtype(srcp)   #系统预设文件类型
-	if ftype:
-		if ADDTYPE_FLAG:
-			needftype = needftype | ftype    #合并文件类型
-		else:
-			needftype = ftype            #用户自定义文件类型
-	if not needftype:
-		logger.warning(f"需要扫描的文件类型为空")
-		return
-	if SCAN_FLAG:              #扫描文件开关，不扫描只输出文件类型的统计信息
-		logger.info(f"此次扫描的文件类型: {needftype}")
-		if COPY_FLAG:          #复制文件开关
-			copy = mfolder.copy
-		else:
-			copy = lambda x: False
-		copyresult = list(map(copy, scanFolder(srcp, needftype)))
-		logger.info(f"文件总数: {len(copyresult)}, 复制成功数: {copyresult.count(True)}")
+	if COPY_FLAG:
+		mediafolder = MediaFolder(destp)
+		copyresult = list(map(mediafolder.copy, sourcefolder.scan(needftype)))
+		logger.info(f"多媒体文件总数: {len(copyresult)}, 复制成功数: {copyresult.count(True)}")
 		if copyresult.count(True):
-			mfolder.writefmd5file()     #保存fmd5码到文件中
-
-		
-
+			mediafolder.writefmd5file()     #保存fmd5码到文件中
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='按时间整理照片或视频文件')
 	parser.add_argument('srcp', help='源文件目录')
 	parser.add_argument('destp', help='目标目录')
 	parser.add_argument('-t', '--ftype', nargs='+', metavar='', help='自定义文件类型')
-	parser.add_argument('-f', '--format', choices=['day', 'month', 'year'], help='子目录的样式')
-	parser.add_argument('-s', '--scanflag', action='store_false', help='不扫描源目录下文件，只输出源目录的统计信息')
-	parser.add_argument('-c', '--copyflag', action='store_false', help='不复制文件到目标目录，只统计需复制的文件数量')
-	parser.add_argument('-d', '--delflag', action='store_true', help='已存在或复制成功后删除源文件')
 	parser.add_argument('-a', '--addtypeflag', action='store_true', help='在系统默认的文件类型上增加新的文件类型')
+	parser.add_argument('-f', '--format', choices=['day', 'month', 'year'], help='子目录的样式')
+	parser.add_argument('-c', '--copyflag', action='store_true', help='复制文件到目标目录')
+	parser.add_argument('-d', '--delflag', action='store_true', help='已存在或复制成功后删除源文件')
 	args = parser.parse_args()
-	# print(args.srcp, args.destp, args.ftype, args.scanflag, args.copyflag, args.delflag, args.addtypeflag)
 	if not Path(args.srcp).exists():
 		logger.error(f"源目录不存在: {args.srcp}")
 		sys.exit(1)
 	if not Path(args.destp).exists():
 		logger.error(f"目标目录不存在: {args.destp}")
 		sys.exit(1)
-	#标准化文件类型格式
-	if args.ftype:
-		ftype = set()
-		for ft in args.ftype:
-			result = re.search(r'\w{2,4}', ft)
-			# print(result.group(0))
-			if result:
-				ftype.add(f".{result.group(0)}")   #标准化文件扩展名,形如: '.jpg'
-	else:
-		ftype = None
-	# print(ftype)
 	#赋值全局变量
-	SCAN_FLAG = args.scanflag
 	COPY_FLAG = args.copyflag
 	DEL_FLAG = args.delflag
 	ADDTYPE_FLAG = args.addtypeflag
 	FolderFormat.setfmt(args.format)   #设置子目录名样式
 	# print(FolderFormat.datefmt)
 	#调用主函数，传入命令行输入的参数
-	main(args.srcp, args.destp, ftype=ftype)
+	main(args.srcp, args.destp, args.ftype)
+
+
+
+
+
+# def main(srcp, destp, ftype=None):
+# 	try:
+# 		mfolder = MediaFolder(destp)    #目标目录实例化
+# 	except Exception as err:
+# 		logger.error(f"fmd5码核对错误: {err}")
+# 		return
+# 	needftype = countFtype(srcp)   #系统预设文件类型
+# 	if ftype:
+# 		if ADDTYPE_FLAG:
+# 			needftype = needftype | ftype    #合并文件类型
+# 		else:
+# 			needftype = ftype            #用户自定义文件类型
+# 	if not needftype:
+# 		logger.warning(f"需要扫描的文件类型为空")
+# 		return
+# 	if SCAN_FLAG:              #扫描文件开关，不扫描只输出文件类型的统计信息
+# 		logger.info(f"此次扫描的文件类型: {needftype}")
+# 		if COPY_FLAG:          #复制文件开关
+# 			copy = mfolder.copy
+# 		else:
+# 			copy = lambda x: False
+# 		copyresult = list(map(copy, scanFolder(srcp, needftype)))
+# 		logger.info(f"文件总数: {len(copyresult)}, 复制成功数: {copyresult.count(True)}")
+# 		if copyresult.count(True):
+# 			mfolder.writefmd5file()     #保存fmd5码到文件中
+
+		
+
+
+# if __name__ == '__main__':
+# 	parser = argparse.ArgumentParser(description='按时间整理照片或视频文件')
+# 	parser.add_argument('srcp', help='源文件目录')
+# 	parser.add_argument('destp', help='目标目录')
+# 	parser.add_argument('-t', '--ftype', nargs='+', metavar='', help='自定义文件类型')
+# 	parser.add_argument('-f', '--format', choices=['day', 'month', 'year'], help='子目录的样式')
+# 	parser.add_argument('-s', '--scanflag', action='store_false', help='不扫描源目录下文件，只输出源目录的统计信息')
+# 	parser.add_argument('-c', '--copyflag', action='store_false', help='不复制文件到目标目录，只统计需复制的文件数量')
+# 	parser.add_argument('-d', '--delflag', action='store_true', help='已存在或复制成功后删除源文件')
+# 	parser.add_argument('-a', '--addtypeflag', action='store_true', help='在系统默认的文件类型上增加新的文件类型')
+# 	args = parser.parse_args()
+# 	# print(args.srcp, args.destp, args.ftype, args.scanflag, args.copyflag, args.delflag, args.addtypeflag)
+# 	if not Path(args.srcp).exists():
+# 		logger.error(f"源目录不存在: {args.srcp}")
+# 		sys.exit(1)
+# 	if not Path(args.destp).exists():
+# 		logger.error(f"目标目录不存在: {args.destp}")
+# 		sys.exit(1)
+# 	#标准化文件类型格式
+# 	if args.ftype:
+# 		ftype = set()
+# 		for ft in args.ftype:
+# 			result = re.search(r'\w{2,4}', ft)
+# 			# print(result.group(0))
+# 			if result:
+# 				ftype.add(f".{result.group(0)}")   #标准化文件扩展名,形如: '.jpg'
+# 	else:
+# 		ftype = None
+# 	# print(ftype)
+# 	#赋值全局变量
+# 	SCAN_FLAG = args.scanflag
+# 	COPY_FLAG = args.copyflag
+# 	DEL_FLAG = args.delflag
+# 	ADDTYPE_FLAG = args.addtypeflag
+# 	FolderFormat.setfmt(args.format)   #设置子目录名样式
+# 	# print(FolderFormat.datefmt)
+# 	#调用主函数，传入命令行输入的参数
+# 	main(args.srcp, args.destp, ftype)
 
 
